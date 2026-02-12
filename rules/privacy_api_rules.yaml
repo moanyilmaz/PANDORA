@@ -1,0 +1,416 @@
+# =========================================================
+# 隐私敏感API规则库
+# 定义了需要检测的HarmonyOS系统模块、方法名及其调用范式
+# =========================================================
+
+# 模块名使用 @ohos: 前缀（与 MODULE_REQUEST_ARRAY 中的格式一致）
+# paradigm 类型:
+#   indirect_invoke   - 需工厂方法获取实例后再调用
+#   direct_invoke     - 直接调用模块方法
+#   callback_invoke   - 通过回调函数获取数据
+#   constant_access   - 直接读取模块常量属性
+
+rules:
+  # ===== 剪切板 =====
+  - id: "CLIPBOARD_001"
+    module: "@ohos:pasteboard"
+    method: "getSystemPasteboard"
+    paradigm: "indirect_invoke"
+    category: "CLIPBOARD"
+    description: "获取系统剪切板服务实例"
+
+  - id: "CLIPBOARD_002"
+    module: "@ohos:pasteboard"
+    method: "getData"
+    paradigm: "indirect_invoke"
+    category: "CLIPBOARD"
+    description: "读取剪切板数据（需先获取实例）"
+
+  - id: "CLIPBOARD_003"
+    module: "@ohos:pasteboard"
+    method: "getPasteData"
+    paradigm: "indirect_invoke"
+    category: "CLIPBOARD"
+    description: "读取剪切板内容"
+
+  # ===== 设备信息 =====
+  - id: "DEVICE_001"
+    module: "@ohos:deviceInfo"
+    method: "deviceType"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取设备类型"
+
+  - id: "DEVICE_002"
+    module: "@ohos:deviceInfo"
+    method: "manufacture"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取设备制造商"
+
+  - id: "DEVICE_003"
+    module: "@ohos:deviceInfo"
+    method: "brand"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取设备品牌"
+
+  - id: "DEVICE_004"
+    module: "@ohos:deviceInfo"
+    method: "marketName"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取设备市场名称"
+
+  - id: "DEVICE_005"
+    module: "@ohos:deviceInfo"
+    method: "productSeries"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取产品系列"
+
+  - id: "DEVICE_006"
+    module: "@ohos:deviceInfo"
+    method: "productModel"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取产品型号"
+
+  - id: "DEVICE_007"
+    module: "@ohos:deviceInfo"
+    method: "serial"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取设备序列号"
+
+  - id: "DEVICE_008"
+    module: "@ohos:deviceInfo"
+    method: "osFullName"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取OS完整名称"
+
+  - id: "DEVICE_009"
+    module: "@ohos:deviceInfo"
+    method: "displayVersion"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取显示版本"
+
+  - id: "DEVICE_010"
+    module: "@ohos:deviceInfo"
+    method: "udid"
+    paradigm: "constant_access"
+    category: "DEVICE_INFO"
+    description: "读取UDID"
+
+  # ===== 企业设备信息 =====
+  - id: "ENT_DEVICE_001"
+    module: "@ohos:enterprise.deviceInfo"
+    method: "getDeviceInfo"
+    paradigm: "direct_invoke"
+    category: "DEVICE_INFO"
+    description: "企业设备管理 - 获取设备信息"
+
+  # ===== 地理位置 =====
+  - id: "LOC_001"
+    module: "@ohos:geoLocationManager"
+    method: "getCurrentLocation"
+    paradigm: "callback_invoke"
+    category: "PRECISE_LOCATION"
+    description: "获取当前精确位置"
+
+  - id: "LOC_002"
+    module: "@ohos:geoLocationManager"
+    method: "on"
+    paradigm: "callback_invoke"
+    category: "PRECISE_LOCATION"
+    description: "注册位置变化监听"
+
+  - id: "LOC_003"
+    module: "@ohos:geoLocationManager"
+    method: "getLastLocation"
+    paradigm: "direct_invoke"
+    category: "PRECISE_LOCATION"
+    description: "获取上次缓存位置"
+
+  # ===== 广告标识 =====
+  - id: "OAID_001"
+    module: "@ohos:identifier.oaid"
+    method: "getOAID"
+    paradigm: "callback_invoke"
+    category: "ADVERTISING_ID"
+    description: "获取开放匿名设备标识符(OAID)"
+
+  # ===== 联系人 =====
+  - id: "CONTACT_001"
+    module: "@ohos:contact"
+    method: "selectContacts"
+    paradigm: "callback_invoke"
+    category: "CONTACTS"
+    description: "选择联系人"
+
+  - id: "CONTACT_002"
+    module: "@ohos:contact"
+    method: "queryContacts"
+    paradigm: "callback_invoke"
+    category: "CONTACTS"
+    description: "查询联系人列表"
+
+  - id: "CONTACT_003"
+    module: "@ohos:contact"
+    method: "queryContact"
+    paradigm: "callback_invoke"
+    category: "CONTACTS"
+    description: "查询单个联系人"
+
+  # ===== 短信 =====
+  - id: "SMS_001"
+    module: "@ohos:telephony.sms"
+    method: "getDefaultSmsSlotId"
+    paradigm: "direct_invoke"
+    category: "SMS"
+    description: "获取默认短信卡槽ID"
+
+  - id: "SMS_002"
+    module: "@ohos:telephony.sms"
+    method: "sendMessage"
+    paradigm: "callback_invoke"
+    category: "SMS"
+    description: "发送短信"
+
+  - id: "SMS_003"
+    module: "@ohos:telephony.sms"
+    method: "createMessage"
+    paradigm: "callback_invoke"
+    category: "SMS"
+    description: "创建短信消息对象"
+
+  # ===== 相机 =====
+  - id: "CAMERA_001"
+    module: "@ohos:multimedia.camera"
+    method: "getCameraManager"
+    paradigm: "indirect_invoke"
+    category: "CAMERA"
+    description: "获取相机管理器实例"
+
+  - id: "CAMERA_002"
+    module: "@ohos:multimedia.camera"
+    method: "getSupportedCameras"
+    paradigm: "indirect_invoke"
+    category: "CAMERA"
+    description: "获取支持的相机列表"
+
+  # ===== 音频 =====
+  - id: "AUDIO_001"
+    module: "@ohos:multimedia.audio"
+    method: "getAudioManager"
+    paradigm: "indirect_invoke"
+    category: "MICROPHONE"
+    description: "获取音频管理器"
+
+  - id: "AUDIO_002"
+    module: "@ohos:multimedia.audio"
+    method: "createAudioCapturer"
+    paradigm: "callback_invoke"
+    category: "MICROPHONE"
+    description: "创建音频录制器"
+
+  # ===== 传感器 =====
+  - id: "SENSOR_001"
+    module: "@ohos:sensor"
+    method: "on"
+    paradigm: "callback_invoke"
+    category: "SENSOR_DATA"
+    description: "注册传感器数据监听（加速度/陀螺仪等）"
+
+  - id: "SENSOR_002"
+    module: "@ohos:sensor"
+    method: "once"
+    paradigm: "callback_invoke"
+    category: "SENSOR_DATA"
+    description: "一次性获取传感器数据"
+
+  # ===== WiFi =====
+  - id: "WIFI_001"
+    module: "@ohos:wifiManager"
+    method: "getLinkedInfo"
+    paradigm: "callback_invoke"
+    category: "NETWORK_INFO"
+    description: "获取WiFi连接信息"
+
+  - id: "WIFI_002"
+    module: "@ohos:wifiManager"
+    method: "getScanInfoList"
+    paradigm: "direct_invoke"
+    category: "NETWORK_INFO"
+    description: "获取WiFi扫描结果列表"
+
+  - id: "WIFI_003"
+    module: "@ohos:wifiManager"
+    method: "isConnected"
+    paradigm: "direct_invoke"
+    category: "NETWORK_INFO"
+    description: "检查WiFi是否已连接"
+
+  - id: "WIFI_004"
+    module: "@ohos:wifiManager"
+    method: "getIpInfo"
+    paradigm: "direct_invoke"
+    category: "NETWORK_INFO"
+    description: "获取WiFi IP信息"
+
+  # ===== 蓝牙 =====
+  - id: "BT_001"
+    module: "@ohos:bluetooth.access"
+    method: "getState"
+    paradigm: "direct_invoke"
+    category: "BLUETOOTH"
+    description: "获取蓝牙状态"
+
+  - id: "BT_002"
+    module: "@ohos:bluetooth.access"
+    method: "on"
+    paradigm: "callback_invoke"
+    category: "BLUETOOTH"
+    description: "注册蓝牙状态监听"
+
+  - id: "BT_003"
+    module: "@ohos:bluetooth.a2dp"
+    method: "getConnectionState"
+    paradigm: "direct_invoke"
+    category: "BLUETOOTH"
+    description: "获取A2DP连接状态"
+
+  # ===== 网络连接 =====
+  - id: "NET_001"
+    module: "@ohos:net.connection"
+    method: "getDefaultNet"
+    paradigm: "direct_invoke"
+    category: "NETWORK_INFO"
+    description: "获取默认网络"
+
+  - id: "NET_002"
+    module: "@ohos:net.connection"
+    method: "getAllNets"
+    paradigm: "callback_invoke"
+    category: "NETWORK_INFO"
+    description: "获取所有网络连接"
+
+  - id: "NET_003"
+    module: "@ohos:net.connection"
+    method: "getConnectionProperties"
+    paradigm: "callback_invoke"
+    category: "NETWORK_INFO"
+    description: "获取网络连接属性"
+
+  - id: "NET_004"
+    module: "@ohos:net.connection"
+    method: "getNetCapabilities"
+    paradigm: "callback_invoke"
+    category: "NETWORK_INFO"
+    description: "获取网络能力信息"
+
+  # ===== 账户信息 =====
+  - id: "ACCOUNT_001"
+    module: "@ohos:account.osAccount"
+    method: "getAccountManager"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "获取OS账户管理器"
+
+  - id: "ACCOUNT_002"
+    module: "@ohos:account.osAccount"
+    method: "queryOsAccountLocalIdFromProcess"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "查询进程关联的本地账户ID"
+
+  - id: "ACCOUNT_003"
+    module: "@ohos:account.appAccount"
+    method: "createAppAccountManager"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "创建应用账户管理器"
+
+  - id: "ACCOUNT_004"
+    module: "@ohos:account.distributedAccount"
+    method: "getDistributedAccountAbility"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "获取分布式账户能力"
+
+  # ===== 分布式设备管理 =====
+  - id: "DIST_001"
+    module: "@ohos:distributedDeviceManager"
+    method: "createDeviceManager"
+    paradigm: "indirect_invoke"
+    category: "DEVICE_INFO"
+    description: "创建分布式设备管理器"
+
+  # ===== 补充: 账户操作 =====
+  - id: "ACCOUNT_005"
+    module: "@ohos:account.osAccount"
+    method: "getOsAccountLocalId"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "获取本地账户ID"
+
+  - id: "ACCOUNT_006"
+    module: "@ohos:account.appAccount"
+    method: "getAllAccounts"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "获取所有应用账户"
+
+  - id: "ACCOUNT_007"
+    module: "@ohos:account.appAccount"
+    method: "createAccount"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "创建应用账户"
+
+  - id: "ACCOUNT_008"
+    module: "@ohos:account.distributedAccount"
+    method: "getOsAccountDistributedInfo"
+    paradigm: "indirect_invoke"
+    category: "ACCOUNT_INFO"
+    description: "获取分布式账户信息"
+
+  # ===== 补充: 短信能力 =====
+  - id: "SMS_004"
+    module: "@ohos:telephony.sms"
+    method: "hasSmsCapability"
+    paradigm: "direct_invoke"
+    category: "SMS"
+    description: "检查设备短信能力"
+
+  - id: "SMS_005"
+    module: "@ohos:telephony.sms"
+    method: "getDefaultSmsSimId"
+    paradigm: "direct_invoke"
+    category: "SMS"
+    description: "获取默认短信SIM卡ID"
+
+  # ===== 补充: 音频场景 =====
+  - id: "AUDIO_003"
+    module: "@ohos:multimedia.audio"
+    method: "getAudioScene"
+    paradigm: "indirect_invoke"
+    category: "MICROPHONE"
+    description: "获取当前音频场景"
+
+  # ===== 补充: 位置状态 =====
+  - id: "LOC_004"
+    module: "@ohos:geoLocationManager"
+    method: "isLocationEnabled"
+    paradigm: "direct_invoke"
+    category: "PRECISE_LOCATION"
+    description: "检查定位服务是否启用"
+
+# 需监控但不直接归类为隐私的模块（灰名单）
+watch_modules:
+  - "@ohos:abilityAccessCtrl"
+  - "@ohos:data.preferences"
+  - "@ohos:data.distributedKVStore"
+
