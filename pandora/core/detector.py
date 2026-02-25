@@ -733,7 +733,7 @@ class ApiDetector:
 # ============================================================
 if __name__ == "__main__":
     import sys
-    from pa_parser import parse_pa_file
+    from parser import parse_pa_file
 
     if len(sys.argv) < 2:
         print("Usage: python api_detector.py <file.pa>")

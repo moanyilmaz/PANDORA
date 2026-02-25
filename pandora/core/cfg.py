@@ -30,6 +30,19 @@ _BRANCH_OPCODES = _UNCONDITIONAL_JUMPS | _CONDITIONAL_JUMPS
 # 终止指令 — 0条边 (出口)
 _TERMINATORS = frozenset({'return', 'returnundefined', 'throw'})
 
+# 条件抛出指令 — 正常时直落，异常时跳转到 handler
+# throw.undefinedifholewithname: 变量未初始化时抛出 ReferenceError
+# throw.ifsupernotcorrectcall: super() 调用不正确时抛出 TypeError
+_CONDITIONAL_THROWS = frozenset({
+    'throw.undefinedifholewithname',
+    'throw.ifsupernotcorrectcall',
+})
+
+# 协程挂起指令 — 基本块终止点 (await/yield 点)
+# suspendgenerator: async function 的 await 或 generator 的 yield
+# 挂起后恢复执行的 resumegenerator 位于下一条指令，是新基本块的起始
+_SUSPEND_OPCODES = frozenset({'suspendgenerator'})
+
 
 # ============================================================
 # 数据结构
@@ -110,9 +123,11 @@ class ControlFlowGraph:
             if 0 <= idx < n:
                 block_starts.add(idx)
 
-        # 分支/终止指令 → 下一条为块起始 (直落边)
+        # 分支/终止/挂起指令 → 下一条为块起始
         for idx, inst in enumerate(instructions):
-            if inst.opcode in _BRANCH_OPCODES or inst.opcode in _TERMINATORS:
+            if (inst.opcode in _BRANCH_OPCODES or
+                    inst.opcode in _TERMINATORS or
+                    inst.opcode in _SUSPEND_OPCODES):
                 if idx + 1 < n:
                     block_starts.add(idx + 1)
 
@@ -170,18 +185,25 @@ class ControlFlowGraph:
             elif op in _TERMINATORS:
                 pass  # 无后继 (函数出口)
 
-            else:
-                # 非分支/终止: 直落到下一个块
+            elif op in _SUSPEND_OPCODES:
+                # 协程挂起: 1条直落边到恢复点 (resumegenerator)
                 if block.end_idx in start_to_bid:
                     ft = start_to_bid[block.end_idx]
                     block.successors.append(ft)
                     blocks[ft].predecessors.append(block.id)
 
-        # ---- Step 4: 构建 try→handler 隐式边 ----
+            else:
+                # 非分支/终止/挂起: 直落到下一个块
+                if block.end_idx in start_to_bid:
+                    ft = start_to_bid[block.end_idx]
+                    block.successors.append(ft)
+                    blocks[ft].predecessors.append(block.id)
+
+        # ---- Step 4: 构建 try→handler 隐式异常边 ----
         # PA bytecode try-catch 结构:
         #   try_begin_label_N → try_end_label_N → handler_begin_label_N_M
         # try 区域内任何指令都可能抛异常跳转到 handler,
-        # 因此 try 区域的入口块需要有边到 handler (保证寄存器状态传播)。
+        # 因此 try 区域内的 **所有** 基本块都需要有边到 handler。
         import re
         try_regions = {}  # N -> {'begin': idx, 'end': idx, 'handlers': [idx, ...]}
         for label, idx in labels.items():
@@ -204,26 +226,20 @@ class ControlFlowGraph:
         for region in try_regions.values():
             if region['begin'] is None or not region['handlers']:
                 continue
-            # 找到 try 区域入口所在的块
-            try_start = region['begin']
-            if try_start not in start_to_bid:
-                # 找包含 try_start 的块
-                try_bid = None
-                for b in blocks:
-                    if b.start_idx <= try_start < b.end_idx:
-                        try_bid = b.id
-                        break
-            else:
-                try_bid = start_to_bid[try_start]
+            try_begin = region['begin']
+            try_end = region['end'] if region['end'] is not None else n
 
-            if try_bid is not None:
-                for handler_idx in region['handlers']:
-                    if handler_idx in start_to_bid:
-                        handler_bid = start_to_bid[handler_idx]
-                        # 添加 try入口→handler 的隐式边
-                        if handler_bid not in blocks[try_bid].successors:
-                            blocks[try_bid].successors.append(handler_bid)
-                            blocks[handler_bid].predecessors.append(try_bid)
+            # 找到 try 区域内的所有基本块
+            # 条件: 基本块的起始指令索引在 [try_begin, try_end) 区间内
+            for b in blocks:
+                if b.start_idx >= try_begin and b.start_idx < try_end:
+                    for handler_idx in region['handlers']:
+                        if handler_idx in start_to_bid:
+                            handler_bid = start_to_bid[handler_idx]
+                            # 避免重复添加
+                            if handler_bid not in b.successors:
+                                b.successors.append(handler_bid)
+                                blocks[handler_bid].predecessors.append(b.id)
 
         return ControlFlowGraph(blocks, 0)
 
