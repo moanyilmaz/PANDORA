@@ -28,6 +28,7 @@ EDGE_CALLARG = "callarg"             # 直接函数调用
 EDGE_CALLTHIS = "callthis"           # 方法调用 (对象上)
 EDGE_NEWOBJRANGE = "newobjrange"     # 构造函数调用
 EDGE_EXTERNAL_API = "external_api"   # 外部模块 API 调用
+EDGE_IMPLICIT_UI = "implicit_ui"     # ArkUI 声明式框架隐式调用 (虚拟边)
 
 
 # ============================================================
@@ -292,7 +293,19 @@ def _analyze_function_calls(cg: CallGraph, func: PaFunction,
             if len(parts) >= 2:
                 method_name = parts[1].strip().strip('"')
                 if acc_state[0] == "module_ref":
+                    # 记录属性/方法引用
                     acc_state = ("method_ref", (acc_state[1], method_name))
+                    # constant_access 范式: 直接读取模块常量属性
+                    # 如 @ohos:deviceInfo 的 brand, serial 等
+                    # 生成一条 external_api 边（属性读取也是一种访问）
+                    callee_name = f"{acc_state[1][0]}::{method_name}"
+                    cg.add_edge(CallEdge(
+                        caller=func.name,
+                        callee=callee_name,
+                        edge_type=EDGE_EXTERNAL_API,
+                        line_no=inst.line_no,
+                        call_info=f"{acc_state[1][0]}.{method_name} (property_access)"
+                    ))
                 elif acc_state[0] == "factory_instance":
                     acc_state = ("method_ref", (acc_state[1], method_name))
                 else:
@@ -317,7 +330,8 @@ def _analyze_function_calls(cg: CallGraph, func: PaFunction,
                 src = parts[1].strip()
                 reg_state[dst] = reg_state.get(src, (None, None))
 
-        elif op in ('callarg0', 'callarg1', 'callargs2', 'callargs3'):
+        elif op in ('callarg0', 'callarg1', 'callargs2', 'callargs3',
+                    'callrange', 'wide.callrange'):
             # 直接函数调用: callarg0 0x0, vN  (vN 持有函数引用)
             parts = operands.split(',')
             if len(parts) >= 2:
@@ -331,6 +345,38 @@ def _analyze_function_calls(cg: CallGraph, func: PaFunction,
                         line_no=inst.line_no,
                         call_info=f"callarg -> {state[1]}"
                     ))
+                elif state[0] == "method_ref" and isinstance(state[1], tuple):
+                    # ACC 中的方法引用被 sta 到 vN 后通过 callarg 调用
+                    module_path, method_name = state[1]
+                    if module_path != "?":
+                        callee_name = f"{module_path}::{method_name}"
+                        cg.add_edge(CallEdge(
+                            caller=func.name,
+                            callee=callee_name,
+                            edge_type=EDGE_EXTERNAL_API,
+                            line_no=inst.line_no,
+                            call_info=f"{module_path}.{method_name} (callarg)"
+                        ))
+            # 同时检查 ACC: 某些调用模式函数引用在 ACC 中
+            if acc_state[0] == "method_ref" and isinstance(acc_state[1], tuple):
+                module_path, method_name = acc_state[1]
+                if module_path != "?":
+                    callee_name = f"{module_path}::{method_name}"
+                    cg.add_edge(CallEdge(
+                        caller=func.name,
+                        callee=callee_name,
+                        edge_type=EDGE_EXTERNAL_API,
+                        line_no=inst.line_no,
+                        call_info=f"{module_path}.{method_name} (callarg-acc)"
+                    ))
+            elif acc_state[0] == "func_ref" and acc_state[1]:
+                cg.add_edge(CallEdge(
+                    caller=func.name,
+                    callee=acc_state[1],
+                    edge_type=EDGE_CALLARG,
+                    line_no=inst.line_no,
+                    call_info=f"callarg-acc -> {acc_state[1]}"
+                ))
             # ACC = 调用返回值
             acc_state = (None, None)
 
@@ -434,7 +480,7 @@ def _analyze_function_calls(cg: CallGraph, func: PaFunction,
 
 
 # ============================================================
-# 调试用: 独立运行时打印统计信息
+# 调试: 独立运行时打印统计信息
 # ============================================================
 if __name__ == "__main__":
     import sys

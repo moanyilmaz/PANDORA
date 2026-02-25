@@ -1,7 +1,7 @@
 """
 PA隐私API检测工具 (main.py)
 ===========================
-CLI 入口，协调 解析 → 检测 → 输出 的完整流程。
+CLI 入口，协调 解析 → 调用图 → 检测 → 子图提取 → 输出 的完整流程。
 
 用法:
   python main.py <file.pa>                  # 默认JSON输出到 output/ 目录
@@ -19,20 +19,25 @@ from pathlib import Path
 from pandora.core.parser import parse_pa_file
 from pandora.core.resolver import ModuleResolver
 from pandora.core.detector import ApiDetector, load_rules, RuleMatcher
+from pandora.core.callgraph import build_call_graph
+from pandora.core.subgraph import (
+    analyze_privacy_subgraphs, export_subgraphs, export_subgraphs_dot
+)
 
 
-def _generate_output_path(pa_path: Path, output_dir: str | None) -> Path:
+def _generate_output_paths(pa_path: Path, output_dir: str | None) -> dict:
     """
-    生成输出文件路径: output/results_<pa前缀名>_<时间戳>.json
-    例如: output/results_modules_20260212_192003.json
+    生成所有输出文件路径:
+      - results_<prefix>_<timestamp>.json    (API 检测结果)
+      - subgraphs_<prefix>_<timestamp>.json  (隐私子图 JSON)
+      - subgraphs_<prefix>_<timestamp>.dot   (隐私子图 DOT)
+
+    Returns:
+        {"results": Path, "subgraphs_json": Path, "subgraphs_dot": Path}
     """
-    # pa文件前缀名 (去掉 .pa 扩展名)
     prefix = pa_path.stem
-
-    # 时间戳
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # 输出目录
     if output_dir:
         out_dir = Path(output_dir)
     else:
@@ -40,8 +45,11 @@ def _generate_output_path(pa_path: Path, output_dir: str | None) -> Path:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"results_{prefix}_{timestamp}.json"
-    return out_dir / filename
+    return {
+        "results": out_dir / f"results_{prefix}_{timestamp}.json",
+        "subgraphs_json": out_dir / f"subgraphs_{prefix}_{timestamp}.json",
+        "subgraphs_dot": out_dir / f"subgraphs_{prefix}_{timestamp}.dot",
+    }
 
 
 def format_table(detections, unmatched):
@@ -63,8 +71,6 @@ def format_table(detections, unmatched):
     for cat, items in sorted(by_category.items()):
         lines.append(f"\n--- {cat} ({len(items)} detections) ---")
         for d in items:
-            short_func = d.function_name.split('.')[-1] if '.' in d.function_name else d.function_name
-            # 取函数名最后两段
             parts = d.function_name.split('.')
             short_func = '.'.join(parts[-2:]) if len(parts) >= 2 else d.function_name
 
@@ -143,6 +149,8 @@ def main():
     parser.add_argument("--rules", help="Path to custom rules YAML file")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show verbose parsing info")
+    parser.add_argument("--no-subgraph", action="store_true",
+                        help="Skip subgraph extraction (faster, only output results JSON)")
     args = parser.parse_args()
 
     pa_path = Path(args.pa_file)
@@ -181,24 +189,69 @@ def main():
     results = detector.analyze_all()
     t_detect = time.time() - t1
 
-    elapsed = time.time() - t0
-    print(f"[DONE] {len(results)} detections found in {elapsed:.2f}s", file=sys.stderr)
+    elapsed_detect = time.time() - t0
+    print(f"[DETECT] {len(results)} detections found in {elapsed_detect:.2f}s",
+          file=sys.stderr)
 
-    # ---- 4. 输出结果 ----
+    # ---- 4. 构建调用图 + 子图提取 ----
+    subgraphs = []
+
+    if not args.no_subgraph:
+        print(f"[CALLGRAPH] Building call graph...", file=sys.stderr)
+        t2 = time.time()
+        cg = build_call_graph(pa, import_resolver=resolver)
+        t_cg = time.time() - t2
+        stats = cg.stats()
+        print(f"[CALLGRAPH] {stats['total_nodes']} nodes, "
+              f"{stats['total_edges']} edges "
+              f"({stats['internal_functions']} internal) in {t_cg:.2f}s",
+              file=sys.stderr)
+
+        print(f"[SUBGRAPH] Extracting privacy subgraphs "
+              f"(SCC + dominator tree + clustering)...", file=sys.stderr)
+        t3 = time.time()
+        subgraphs = analyze_privacy_subgraphs(cg, pa, rules_path)
+        t_subgraph = time.time() - t3
+
+        collab = sum(1 for s in subgraphs if s.id.startswith("collab_"))
+        single = sum(1 for s in subgraphs if s.id.startswith("single_"))
+        all_cats = set()
+        for sg in subgraphs:
+            all_cats.update(sg.privacy_categories)
+
+        print(f"[SUBGRAPH] {len(subgraphs)} subgraphs "
+              f"({collab} collab, {single} single), "
+              f"{len(all_cats)} categories in {t_subgraph:.2f}s",
+              file=sys.stderr)
+
+    elapsed_total = time.time() - t0
+    print(f"[DONE] Total analysis completed in {elapsed_total:.2f}s",
+          file=sys.stderr)
+
+    # ---- 5. 输出结果 ----
     if args.format == "table":
         output = format_table(results, detector.unmatched)
         print(output)
     else:
-        data = format_json(results, detector.unmatched, pa, elapsed)
-        output = json.dumps(data, ensure_ascii=False, indent=2)
+        # 生成统一时间戳的输出路径
+        paths = _generate_output_paths(pa_path, args.output)
 
-        # 自动生成输出文件路径: output/results_<前缀>_<时间戳>.json
-        out_path = _generate_output_path(pa_path, args.output)
-        with open(out_path, 'w', encoding='utf-8') as f:
+        # 5a. 输出 API 检测结果 JSON
+        data = format_json(results, detector.unmatched, pa, elapsed_total)
+        output = json.dumps(data, ensure_ascii=False, indent=2)
+        with open(paths["results"], 'w', encoding='utf-8') as f:
             f.write(output)
-        print(f"[OUTPUT] Results written to {out_path}", file=sys.stderr)
+        print(f"[OUTPUT] Results    -> {paths['results']}", file=sys.stderr)
+
+        # 5b. 输出子图 JSON + DOT
+        if subgraphs:
+            export_subgraphs(subgraphs, str(paths["subgraphs_json"]))
+            export_subgraphs_dot(subgraphs, str(paths["subgraphs_dot"]))
+            print(f"[OUTPUT] Subgraphs  -> {paths['subgraphs_json']}",
+                  file=sys.stderr)
+            print(f"[OUTPUT] DOT graph  -> {paths['subgraphs_dot']}",
+                  file=sys.stderr)
 
 
 if __name__ == "__main__":
     main()
-
