@@ -1,266 +1,247 @@
-# PANDORA - 实现细节文档
+# PANDORA - Implementation Details
 
-PANDORA 是一款面向鸿蒙 (HarmonyOS) 应用的高性能静态分析引擎，在二进制层面审计应用的隐私合规性。通过解析 Panda Assembly (.pa) —— ArkTS/eTS 字节码的反汇编输出 —— PANDORA 无需获取源代码即可识别敏感系统 API 调用及其协同采集模式。
+PANDORA is a high-performance static analysis engine for HarmonyOS applications. It audits privacy compliance at the binary level by parsing Panda Assembly (`.pa`) files, the disassembled form of ArkTS/eTS bytecode. PANDORA can detect sensitive system API calls and collaborative collection patterns without requiring source code.
 
-核心引擎基于 **控制流图 (CFG) 上的固定点寄存器状态机追踪** 进行函数内 API 检测，并通过 **全局调用图构建 + 语义根回溯（生命周期入口追溯）+ 同模块生命周期上下文标注** 实现跨函数的协同隐私采集子图提取。
+The core engine uses **fixed-point register-state tracking on CFGs** for in-function API detection, then extends the analysis with **global call graph construction + semantic-root backtracking (lifecycle entry tracing) + same-module lifecycle context annotation** to extract cross-function collaborative privacy subgraphs.
 
-## 目录
+## Table of Contents
 
-- [概述](#概述)
-- [核心特性](#核心特性)
-- [架构](#架构)
-- [检测范式](#检测范式)
-- [项目结构](#项目结构)
-- [安装](#安装)
-- [使用方法](#使用方法)
-- [规则系统](#规则系统)
-- [输出格式](#输出格式)
-- [工作原理](#工作原理)
-- [性能](#性能)
-- [扩展方式](#扩展方式)
-- [局限性](#局限性)
-
----
-
-## 概述
-
-鸿蒙应用被编译为 `.abc` (Ark Bytecode) 文件，可通过 `ark_disasm` 工具反汇编为 `.pa` (Panda Assembly) 文本格式。本分析器解析 `.pa` 文件，通过 **基于寄存器追踪的静态分析** 识别对隐私敏感系统 API 的调用（如位置、相机、联系人、设备标识符等），并进一步通过 **调用图分析** 识别多个隐私 API 的协同调用模式。
-
-与简单的字符串匹配方法不同，本工具理解鸿蒙字节码中的四种不同 API 调用范式，使用寄存器状态机在指令序列中精确追踪模块引用，并构建跨函数的调用图来发现协同隐私采集。
-
-### 动机
-
-隐私合规审计通常需要：
-1. **源代码** — 对第三方应用通常不可用
-2. **动态分析** — 需要设备检测，可能遗漏不常执行的代码路径
-3. **二进制分析** — 可以分析任何编译后的应用，无需源代码
-
-本工具实现方法 (3)，提供自动化、可扩展的二进制级隐私 API 检测与协同分析。
+- [Overview](#overview)
+- [Core Features](#core-features)
+- [Architecture](#architecture)
+- [Detection Paradigms](#detection-paradigms)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Rule System](#rule-system)
+- [Output Format](#output-format)
+- [How It Works](#how-it-works)
+- [Performance](#performance)
+- [Extensibility](#extensibility)
+- [Limitations](#limitations)
 
 ---
 
-## 核心特性
+## Overview
 
-- **二进制级分析** — 直接分析编译后的 `.pa` 文件，无需源代码
-- **四范式检测** — 处理直接调用、间接 (工厂) 链式调用、回调调用和常量属性访问
-- **CFG 固定点分析** — 构建控制流图，含基本块分割、try→handler 边、寄存器状态收敛
-- **字符串常量追踪** — 追踪 `lda.str` 值和链式属性访问（如 `sensor.SensorId.ACCELEROMETER`）
-- **全局调用图** — 构建跨函数调用关系图，识别函数间调用链
-- **语义根回溯** — 从敏感 API 逆向 BFS 追溯到 HarmonyOS 生命周期入口（如 `onCreate`、`onForeground`、`build`）或图根节点，定位行为触发的逻辑起点
-- **生命周期上下文标注** — 收集同一 ViewPU 模块下所有生命周期方法（`aboutToAppear`、`initialRender`、`onClick` 等）作为 `lifecycle_context` 元数据附加到每个子图，供下游意图推断模块综合判断触发场景
-- **深层调用链提取** — 从语义根 BFS 到敏感 API，提取完整调用路径，附带函数体
-- **规则驱动检测** — 61 条可配置 YAML 规则覆盖 11+ 敏感 API 类别
-- **误报过滤** — 自动过滤 Promise 链方法 (.then/.catch)、日志调用和资源清理操作
-- **三格式输出** — 同时生成 JSON 检测报告、子图 JSON 和 Graphviz DOT 可视化
-- **高性能** — 1,248 函数 + 16 子图分析约 0.4 秒
+HarmonyOS applications are compiled into `.abc` (Ark Bytecode) files, which can be disassembled into `.pa` (Panda Assembly) text format using the `ark_disasm` tool. This analyzer parses `.pa` files and uses **register-tracking-based static analysis** to identify calls to privacy-sensitive system APIs (such as location, camera, contacts, device identifiers, etc.). It further applies **call graph analysis** to detect coordinated invocation patterns involving multiple privacy APIs.
 
----
+Unlike simple string-matching approaches, this tool understands four distinct API invocation paradigms in HarmonyOS bytecode. It uses a register state machine to precisely track module references through instruction sequences, and builds a cross-function call graph to surface collaborative privacy data collection.
 
-## 架构
+### Motivation
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                          main.py (CLI)                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐│
-│  │ parser   │─>│ resolver │─>│ detector │  │   callgraph      ││
-│  │          │  │          │  │          │  │   + subgraph      ││
-│  │ .pa解析  │  │ 模块解析 │  │ API检测  │  │   协同子图提取   ││
-│  └──────────┘  └──────────┘  └──────────┘  └────────┬─────────┘│
-│                                                      │          │
-│                                              ┌───────┴────────┐ │
-│                                              │ rules/*.yaml   │ │
-│                                              └────────────────┘ │
-├─────────────────────────────────────────────────────────────────┤
-│  output/results_*.json       API 检测报告                       │
-│  output/subgraphs_*.json     隐私子图 (带函数体)                │
-│  output/subgraphs_*.dot      隐私子图 (Graphviz 可视化)         │
-└─────────────────────────────────────────────────────────────────┘
-```
+Privacy compliance auditing typically requires one of:
+1. **Source code** — usually unavailable for third-party applications.
+2. **Dynamic analysis** — requires device instrumentation and may miss infrequently executed code paths.
+3. **Binary analysis** — can analyze any compiled application without source code.
 
-### 处理流程
-
-```
-.pa 文件 ──► 解析 (Literals, Records, Functions)
-                       │
-                       ▼
-             模块解析 (Record → LiteralArray → Import Map)
-                       │
-              ┌────────┴────────┐
-              ▼                 ▼
-     函数内寄存器追踪     全局调用图构建
-     + 规则匹配            (callgraph.py)
-              │                 │
-              ▼                 ▼
-     results_*.json      1. 敏感节点标注
-                         2. 语义根回溯 (逆向BFS→生命周期入口)
-                         3. BFS 子图提取 + 函数体附加
-                                │
-                                ▼
-                        subgraphs_*.json
-                        subgraphs_*.dot
-```
+This tool implements approach (3), providing automated, scalable binary-level privacy API detection and collaborative analysis.
 
 ---
 
-## 检测范式
+## Core Features
 
-本工具识别鸿蒙字节码中四种不同的隐私 API 调用模式：
+- **Binary-level analysis** — Analyzes compiled `.pa` files directly; no source code required.
+- **Four-paradigm detection** — Handles direct invocation, indirect (factory) chained invocation, callback invocation, and constant property access.
+- **CFG fixed-point analysis** — Builds control-flow graphs with basic block splitting, try→handler edges, and register-state convergence.
+- **String constant tracking** — Tracks `lda.str` values and chained property accesses (e.g., `sensor.SensorId.ACCELEROMETER`).
+- **Global call graph** — Builds a cross-function call relationship graph to identify inter-function call chains.
+- **Semantic-root backtracking** — Reverse BFS from sensitive APIs to HarmonyOS lifecycle entry points (such as `onCreate`, `onForeground`, `build`) or graph roots, locating the logical starting point of each behavior.
+- **Lifecycle context annotation** — Collects all lifecycle methods in the same ViewPU module (such as `aboutToAppear`, `initialRender`, `onClick`) and attaches them as `lifecycle_context` metadata to each subgraph for downstream intent inference.
+- **Deep call-chain extraction** — BFS from semantic roots to sensitive APIs, extracting complete call paths with function bodies.
+- **Rule-driven detection** — 61 configurable YAML rules covering 11+ sensitive API categories.
+- **False-positive filtering** — Automatically filters Promise chain methods (`.then`/`.catch`), logging calls, and resource cleanup operations.
+- **Three output formats** — Simultaneously generates a JSON detection report, a subgraph JSON, and a Graphviz DOT visualization.
+- **High performance** — Analysis of 1,248 functions and 16 subgraphs completes in approximately 0.4 seconds.
 
-### 1. 间接调用 (工厂模式)
+---
 
-工厂方法先获取服务实例，然后在该实例上调用实际的数据访问方法。
+## Architecture
 
-**源码等价：**
+`main.py` is the CLI coordinator and drives the full pipeline. The architecture is organized into the following stages:
+
+1. **Parser stage (`parser.py`)**: parses the `.pa` file into literals, records, and functions.
+2. **Resolver stage (`resolver.py`)**: resolves module mappings through `Record -> LiteralArray -> Import Map` relationships.
+3. **Detector stage (`detector.py`)**: performs instruction-level sensitive API detection via register-state tracking and rule matching.
+4. **Graph analysis stage (`callgraph.py` + `subgraph.py`)**: constructs a global call graph and extracts collaborative privacy subgraphs.
+5. **Rule layer (`rules/*.yaml`)**: supplies declarative detection rules consumed by the detector.
+6. **Output layer**:
+  - `output/results_*.json`: API detection report.
+  - `output/subgraphs_*.json`: extracted privacy subgraphs (with function bodies and metadata).
+  - `output/subgraphs_*.dot`: Graphviz visualization of subgraphs.
+
+### Processing Flow
+
+The end-to-end flow is:
+
+1. Parse the `.pa` file into structured entities (`Literals`, `Records`, `Functions`).
+2. Resolve imports from `Record -> LiteralArray -> Import Map`.
+3. Run in-function register tracking and rule matching to generate `results_*.json`.
+4. Build the global call graph across functions.
+5. Mark sensitive graph nodes.
+6. Backtrack to semantic roots with reverse BFS (typically lifecycle entry points) and collect same-module lifecycle context.
+7. Extract privacy subgraphs using bidirectional BFS, attach function bodies, and annotate `lifecycle_context` metadata.
+8. Emit `subgraphs_*.json` and `subgraphs_*.dot`.
+
+---
+
+## Detection Paradigms
+
+This tool identifies four distinct privacy API invocation patterns in HarmonyOS bytecode.
+
+### 1. Indirect Invocation (Factory Pattern)
+
+A factory method first retrieves a service instance, and the actual data-access method is then called on that instance.
+
+**Equivalent source code:**
 ```typescript
-let pasteboard = pasteboard.getSystemPasteboard();  // 工厂方法
-let data = pasteboard.getData();                     // 数据访问
+let pasteboard = pasteboard.getSystemPasteboard();  // factory method
+let data = pasteboard.getData();                     // data access
 ```
 
-**二进制指令：**
+**Bytecode instructions:**
 ```
 ldexternalmodulevar 0x2
 throw.undefinedifholewithname "pasteboard"
 sta v5
 lda v5
-ldobjbyname 0x0, "getSystemPasteboard"    ◄─ 工厂方法
-callthis0 0x2, v5                          ◄─ 返回实例
+ldobjbyname 0x0, "getSystemPasteboard"    ◄─ factory method
+callthis0 0x2, v5                          ◄─ returns instance
 sta v6
 lda v6
-ldobjbyname 0x0, "getData"                ◄─ 数据访问
-callthis0 0x4, v6                          ◄─ 实际调用
+ldobjbyname 0x0, "getData"                ◄─ data access
+callthis0 0x4, v6                          ◄─ actual call
 ```
 
-**检测机制：** 寄存器追踪器维护 `call_result` 状态及原始模块归属，使链式 `.getData()` 调用可被检测并标注上下文 `"via getSystemPasteboard()"`。
+**Detection mechanism:** The register tracker maintains `call_result` state along with the original module attribution, so the chained `.getData()` call is detected and annotated with context `"via getSystemPasteboard()"`.
 
-### 2. 直接调用
+### 2. Direct Invocation
 
-模块方法直接调用，无需中间实例。
+A module method is called directly without an intermediate instance.
 
 ```
 ldexternalmodulevar 0x3
-ldobjbyname 0x0, "getCurrentLocation"     ◄─ 属性访问
-callthis1 0x2, v4, v5                     ◄─ 直接调用
+ldobjbyname 0x0, "getCurrentLocation"     ◄─ property access
+callthis1 0x2, v4, v5                     ◄─ direct call
 ```
 
-### 3. 回调调用
+### 3. Callback Invocation
 
-回调函数作为参数传入 API 方法。
+A callback function is passed as an argument to an API method.
 
 ```
-definefunc 0x6, ...                          ◄─ 回调定义
-sta v7                                       ◄─ v7 = 闭包
+definefunc 0x6, ...                          ◄─ callback definition
+sta v7                                       ◄─ v7 = closure
 ldobjbyname 0x0, "on"
-callthis3 0x8, v5, v6, v7, v8               ◄─ v7 是闭包参数
+callthis3 0x8, v5, v6, v7, v8               ◄─ v7 is the closure argument
 ```
 
-### 4. 常量属性访问
+### 4. Constant Property Access
 
-模块级常量的只读访问，无方法调用。
+Read-only access to a module-level constant, with no method call.
 
 ```
 ldexternalmodulevar 0x0
-ldobjbyname 0x0, "productModel"            ◄─ 属性读取
-sta v4                                      ◄─ 下一条非 call* 指令
+ldobjbyname 0x0, "productModel"            ◄─ property read
+sta v4                                      ◄─ next non-call* instruction
 ```
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 pa-privacy-analyzer/
-├── main.py                          # CLI 入口 — 解析→检测→调用图→子图→输出
+├── main.py                          # CLI entry point: parse → detect → call graph → subgraph → output
 │
-├── pandora/                         # 核心逻辑层
+├── pandora/                         # Core analysis layer
 │   └── core/
-│       ├── parser.py                # .pa 文件解析 (状态机: Literals→Records→Methods)
-│       ├── resolver.py              # 模块解析 (Record→LiteralArray→Import Map)
-│       ├── cfg.py                   # 控制流图构建 (基本块+异常边+RPO)
-│       ├── detector.py              # 寄存器追踪检测引擎 (四范式)
-│       ├── callgraph.py             # 全局调用图构建 (函数间调用边提取)
-│       └── subgraph.py              # 协同子图提取 (语义根回溯+BFS)
+│       ├── parser.py                # .pa file parsing (state machine: Literals → Records → Methods)
+│       ├── resolver.py              # Module resolution (Record → LiteralArray → Import Map)
+│       ├── cfg.py                   # Control-flow graph construction (basic blocks + exception edges + RPO)
+│       ├── detector.py              # Register-tracking detection engine (four paradigms)
+│       ├── callgraph.py             # Global call graph construction (inter-function call edge extraction)
+│       └── subgraph.py              # Collaborative subgraph extraction (semantic-root backtracking + BFS)
 │
 ├── rules/
-│   └── privacy_api_rules.yaml       # 61+ 条隐私 API 检测规则
+│   └── privacy_api_rules.yaml       # 61+ privacy API detection rules
 │
 ├── docs/
-│   └── implementation_details.md    # 本文档
+│   └── implementation_details.md    # This document
 │
-├── requirements.txt                 # Python 依赖 (pyyaml)
+├── requirements.txt                 # Python dependencies (pyyaml)
 │
-└── output/                          # 自动生成的输出目录
-    ├── results_<name>_<ts>.json     # API 检测结果
-    ├── subgraphs_<name>_<ts>.json   # 隐私子图 (JSON)
-    └── subgraphs_<name>_<ts>.dot    # 隐私子图 (DOT 可视化)
+└── output/                          # Auto-generated output directory
+    ├── results_<name>_<ts>.json     # API detection results
+    ├── subgraphs_<name>_<ts>.json   # Privacy subgraphs (JSON)
+    └── subgraphs_<name>_<ts>.dot    # Privacy subgraphs (DOT visualization)
 ```
 
-### 模块详细
+### Module Details
 
-| 模块 | 说明 |
+| Module | Description |
 |------|------|
-| `parser.py` | 状态机解析器，提取 `ModuleLiteralArray`、`PaRecord`、`PaFunction` |
-| `resolver.py` | 通过最长前缀匹配将函数→Record→LiteralArray 建立 `{local_name: "@ohos:module"}` 导入映射 |
-| `cfg.py` | 轻量级 CFG 构建：基本块分割、显式/隐式边、RPO 计算 |
-| `detector.py` | 核心检测引擎：`RegisterTracker` (ACC+寄存器状态机)、`RuleMatcher` (索引查找)、`ApiDetector` (指令级分析) |
-| `callgraph.py` | 全局调用图：分析 `definefunc`/`callthis*` 指令，构建跨函数调用边，支持内部调用/外部 API 调用/回调调用 |
-| `subgraph.py` | 三阶段子图提取：(1) 敏感节点标注 (2) 语义根回溯 — 逆向 BFS 到生命周期入口或图根 + 同模块生命周期上下文收集 (3) 双向 BFS 子图提取 + 函数体附加 + `lifecycle_context` 元数据 |
-| `main.py` | CLI 入口：协调全流程，生成 3 种输出文件 |
+| `parser.py` | State-machine parser; extracts `ModuleLiteralArray`, `PaRecord`, and `PaFunction` |
+| `resolver.py` | Builds a `{local_name: "@ohos:module"}` import map per function via longest-prefix matching from function → Record → LiteralArray |
+| `cfg.py` | Lightweight CFG construction: basic block splitting, explicit/implicit edges, RPO computation |
+| `detector.py` | Core detection engine: `RegisterTracker` (ACC + register state machine), `RuleMatcher` (indexed lookup), `ApiDetector` (instruction-level analysis) |
+| `callgraph.py` | Global call graph: analyzes `definefunc`/`callthis*` instructions to build cross-function call edges; supports internal calls, external API calls, and callback calls |
+| `subgraph.py` | Three-phase subgraph extraction: (1) sensitive node annotation, (2) semantic-root backtracking — reverse BFS to lifecycle entries or graph roots, plus same-module lifecycle context collection, (3) bidirectional BFS subgraph extraction with function body attachment and `lifecycle_context` metadata |
+| `main.py` | CLI entry point: coordinates the full pipeline and generates three output files |
 
 ---
 
-## 安装
+## Installation
 
-### 前置条件
+### Prerequisites
 
-- **Python 3.10+** (使用 `match` 语法和类型联合 `|`)
-- **PyYAML** 解析规则文件
+- **Python 3.10+** (uses `match` syntax and type union `|`)
+- **PyYAML** for parsing rule files
 
-### 安装步骤
+### Setup
 
 ```bash
 cd pa-privacy-analyzer
 pip install -r requirements.txt
 ```
 
-### 获取 `.pa` 文件
+### Obtaining `.pa` Files
 
 ```bash
 ark_disasm input.abc output.pa
 ```
 
-`ark_disasm` 工具是 [ArkCompiler Runtime Core](https://gitee.com/openharmony/arkcompiler_runtime_core) 工具链的一部分。
+The `ark_disasm` tool is part of the [ArkCompiler Runtime Core](https://gitee.com/openharmony/arkcompiler_runtime_core) toolchain.
 
 ---
 
-## 使用方法
+## Usage
 
-### 基本用法
+### Basic Usage
 
 ```bash
-# 默认: JSON 输出到 output/ 目录 (同时生成 results + subgraphs + DOT)
+# Default: JSON output to output/ directory (generates results + subgraphs + DOT)
 python main.py path/to/modules.pa
 
-# 纯 API 检测模式 (跳过子图提取，更快)
+# API-only mode (skip subgraph extraction for faster runs)
 python main.py path/to/modules.pa --no-subgraph
 
-# 表格输出到控制台
+# Print table format to console
 python main.py path/to/modules.pa --format table
 
-# 自定义输出目录
+# Custom output directory
 python main.py path/to/modules.pa -o custom_output/
 
-# 详细模式
+# Verbose mode
 python main.py path/to/modules.pa -v
 
-# 自定义规则文件
+# Custom rule file
 python main.py path/to/modules.pa --rules custom_rules.yaml
 ```
 
-### 输出文件命名
+### Output File Naming
 
-JSON 输出自动保存到 `output/` 目录，命名规则：
+JSON output is automatically saved to the `output/` directory with the following naming scheme:
 
 ```
 output/results_<pa_file_stem>_<YYYYMMDD_HHMMSS>.json
@@ -268,26 +249,26 @@ output/subgraphs_<pa_file_stem>_<YYYYMMDD_HHMMSS>.json
 output/subgraphs_<pa_file_stem>_<YYYYMMDD_HHMMSS>.dot
 ```
 
-三个文件使用同一时间戳，确保对应关系。
+All three files share the same timestamp, ensuring they correspond to the same run.
 
-### 命令行参数
+### Command-Line Arguments
 
-| 参数 | 说明 | 默认 |
+| Argument | Description | Default |
 |------|------|------|
-| `pa_file` | .pa 文件路径 | (必需) |
-| `--format` | 输出格式: `json` 或 `table` | `json` |
-| `-o, --output` | 输出目录 | `output/` |
-| `--rules` | 自定义 YAML 规则文件 | `rules/privacy_api_rules.yaml` |
-| `--no-subgraph` | 跳过调用图构建和子图提取 | `false` |
-| `-v, --verbose` | 显示详细解析信息 | `false` |
+| `pa_file` | Path to the `.pa` file | (required) |
+| `--format` | Output format: `json` or `table` | `json` |
+| `-o, --output` | Output directory | `output/` |
+| `--rules` | Custom YAML rule file | `rules/privacy_api_rules.yaml` |
+| `--no-subgraph` | Skip call graph construction and subgraph extraction | `false` |
+| `-v, --verbose` | Show verbose parsing details | `false` |
 
 ---
 
-## 规则系统
+## Rule System
 
-规则定义在 `rules/privacy_api_rules.yaml` 中，使用声明式 YAML 格式。
+Rules are defined in `rules/privacy_api_rules.yaml` using a declarative YAML format.
 
-### 规则结构
+### Rule Structure
 
 ```yaml
 rules:
@@ -299,9 +280,9 @@ rules:
     description: "Get system pasteboard service instance"
 ```
 
-### 支持的类别
+### Supported Categories
 
-| 类别 | 规则数 | 典型 API |
+| Category | Rule Count | Typical APIs |
 |------|--------|----------|
 | `DEVICE_INFO` | 12 | `deviceInfo.deviceType`, `.serial`, `.productModel` |
 | `ACCOUNT_INFO` | 8 | `osAccount.getAccountManager`, `appAccount.getAllAccounts` |
@@ -317,9 +298,9 @@ rules:
 
 ---
 
-## 输出格式
+## Output Format
 
-### API 检测 JSON (results_*.json)
+### API Detection JSON (`results_*.json`)
 
 ```json
 {
@@ -344,7 +325,7 @@ rules:
 }
 ```
 
-### 子图 JSON (subgraphs_*.json)
+### Subgraph JSON (`subgraphs_*.json`)
 
 ```json
 {
@@ -370,9 +351,9 @@ rules:
 }
 ```
 
-### 子图 DOT (subgraphs_*.dot)
+### Subgraph DOT (`subgraphs_*.dot`)
 
-可使用 Graphviz 渲染为可视化图：
+Can be rendered into a visual graph using Graphviz:
 
 ```bash
 dot -Tpng subgraphs_modules_20260225_152227.dot -o subgraphs.png
@@ -380,72 +361,72 @@ dot -Tpng subgraphs_modules_20260225_152227.dot -o subgraphs.png
 
 ---
 
-## 工作原理
+## How It Works
 
-### 阶段 1: 解析 (`parser.py`)
+### Phase 1: Parsing (`parser.py`)
 
-解析器使用四状态机处理 `.pa` 文件：
+The parser uses a four-state machine to process `.pa` files:
 
 ```
 INITIAL → TOP_LEVEL → IN_LITERAL_ARR / IN_FUNCTION
 ```
 
-提取结构：
-1. **ModuleLiteralArray** — 包含 `MODULE_REQUEST_ARRAY` 和 `ModuleTag` 声明
-2. **PaRecord** — 带 `moduleRecordIdx` 字段的命名记录
-3. **PaFunction** — 带指令序列的命名函数
+Extracted structures:
+1. **ModuleLiteralArray** — contains `MODULE_REQUEST_ARRAY` and `ModuleTag` declarations.
+2. **PaRecord** — named records with a `moduleRecordIdx` field.
+3. **PaFunction** — named functions with their instruction sequences.
 
-### 阶段 2: 模块解析 (`resolver.py`)
+### Phase 2: Module Resolution (`resolver.py`)
 
-为每个函数通过最长前缀匹配找到所属 Record，跟随 `moduleRecordIdx` 构建 `{local_name: module_request}` 导入映射。
+For each function, the resolver finds the owning Record via longest-prefix matching, then follows `moduleRecordIdx` to build a `{local_name: module_request}` import map.
 
-### 阶段 3: 函数内检测 (`detector.py`)
+### Phase 3: In-function Detection (`detector.py`)
 
-使用两阶段 CFG 分析：
+Uses a two-pass CFG analysis:
 
-1. **固定点迭代**：按 RPO 序处理基本块，传播寄存器状态，在汇合点保守合并
-2. **检测遍历**：使用收敛状态，逐指令分析，匹配 `(module, method)` 对
+1. **Fixed-point iteration**: processes basic blocks in RPO order, propagates register states, and conservatively merges at join points.
+2. **Detection pass**: using the converged register states, analyzes instructions one by one and matches `(module, method)` pairs.
 
-### 阶段 4: 调用图构建 (`callgraph.py`)
+### Phase 4: Call Graph Construction (`callgraph.py`)
 
-分析所有函数中的 `definefunc`/`callthis*` 指令，构建全局调用图：
-- **内部调用边**：函数 A 通过 `definefunc` + `callthis*` 调用函数 B
-- **外部 API 边**：函数调用 `@ohos:*` 系统模块方法
-- **回调边**：通过闭包参数传递间接调用
+Analyzes `definefunc`/`callthis*` instructions across all functions to build a global call graph:
+- **Internal call edges**: function A calls function B via `definefunc` + `callthis*`.
+- **External API edges**: a function calls a `@ohos:*` system module method.
+- **Callback edges**: indirect calls via closure arguments.
 
-### 阶段 5: 敏感节点标注 (`subgraph.py` 阶段一)
+### Phase 5: Sensitive Node Annotation (`subgraph.py` — phase 1)
 
-遍历调用图中所有外部 API 节点，与规则库进行匹配。命中的节点标记为敏感源（SensitiveNode），记录匹配规则 ID 和隐私类别。
+Iterates all external API nodes in the call graph and matches them against the rule library. Matching nodes are marked as sensitive sources (`SensitiveNode`) with their matched rule ID and privacy category.
 
-### 阶段 6: 语义根回溯 + 生命周期上下文收集 (`subgraph.py` 阶段二)
+### Phase 6: Semantic-Root Backtracking + Lifecycle Context Collection (`subgraph.py` — phase 2)
 
-**核心思路**：从敏感 API 的直接调用者逆向 BFS，追溯到 HarmonyOS 生命周期入口函数或图根节点，获得 **"谁在什么上下文中触发了这个行为"** 的语义信息。同时收集同模块下所有生命周期方法作为上下文元数据。
+**Core idea**: starting from the direct callers of sensitive APIs, perform reverse BFS to find HarmonyOS lifecycle entry functions or graph roots. This determines *who triggers the behavior and in what context*. At the same time, all lifecycle methods in the same module are collected as context metadata.
 
-算法流程：
+Algorithm:
 
-1. **收集起点**：找到所有直接调用敏感 API 的内部函数
-2. **逆向 BFS**：从每个起点沿 `incoming` 边向上搜索（最大深度 15 层）
-3. **命中判定** — 按优先级：
-   - **生命周期方法** (最优)：命中 `_LIFECYCLE_PATTERNS` 白名单（`onCreate`、`onForeground`、`build`、`onClick`、`onMessage` 等 30+ 关键词）
-   - **图根节点** (兜底)：无调用者的函数作为逻辑入口
-   - **深度上限**：达到最大回溯深度时取当前最远节点
-4. **聚合分组**：共享同一语义根的敏感源合并为一个子图组
-5. **生命周期上下文收集**：通过函数全限定名的模块前缀匹配，找到同一 ViewPU 类下的所有生命周期方法（如 `aboutToAppear`、`initialRender`、`onClick`、`onPageShow` 等），作为 `lifecycle_context` 列表附加到子图元数据
+1. **Collect start points**: find all internal functions that directly call a sensitive API.
+2. **Reverse BFS**: from each start point, traverse `incoming` edges upward (maximum depth: 15 hops).
+3. **Hit conditions** — in priority order:
+   - **Lifecycle method** (preferred): matches the `_LIFECYCLE_PATTERNS` allowlist (`onCreate`, `onForeground`, `build`, `onClick`, `onMessage`, and 30+ other keywords).
+   - **Graph root** (fallback): a function with no callers is used as the logical entry point.
+   - **Depth limit**: when the maximum backtracking depth is reached, the deepest node found so far is used.
+4. **Aggregation**: sensitive sources that share the same semantic root are merged into one subgraph group.
+5. **Lifecycle context collection**: by matching module-prefix from function fully-qualified names, all lifecycle methods under the same ViewPU class (such as `aboutToAppear`, `initialRender`, `onClick`, `onPageShow`) are found and attached as a `lifecycle_context` list in the subgraph metadata.
 
-**为什么不将生命周期方法作为 BFS 根**：
+**Why lifecycle methods are not used as BFS roots:**
 
-ArkUI 声明式框架中，`initialRender`/`aboutToAppear` 等生命周期方法通过 `ViewPU` 注册机制引用组件函数，而非通过 `callthis*` 指令直接调用。因此调用图中 **不存在从生命周期方法到业务函数的调用边**，如果将生命周期方法作为 BFS 根，双向 BFS 会因无路径而产出空子图。因此采用**两层分离设计**：原始调用者作为 BFS 根（保证路径完整），生命周期方法作为元数据标注（提供触发上下文）。
+In ArkUI declarative framework, lifecycle methods such as `initialRender` and `aboutToAppear` reference component functions through the `ViewPU` registration mechanism rather than through explicit `callthis*` instructions. As a result, the call graph contains no edges from lifecycle methods to business functions. Using lifecycle methods as BFS roots would yield empty subgraphs due to missing paths. The design therefore separates concerns: the original direct callers serve as BFS roots (ensuring complete paths), while lifecycle methods are attached as metadata (providing trigger context).
 
-### 阶段 7: 双向 BFS 子图提取 (`subgraph.py` 阶段三)
+### Phase 7: Bidirectional BFS Subgraph Extraction (`subgraph.py` — phase 3)
 
-从语义根节点出发，双向 BFS 遍历调用图：
-1. **正向 BFS**：从根向下找所有可达节点
-2. **反向 BFS**：从敏感源向上找所有可逆达节点
-3. **取交集**：保留同时在正向和反向可达集合中的节点
-4. **附加函数体**：为每个内部函数节点附加完整的指令序列
-5. **附加生命周期上下文**：将同模块生命周期方法列表作为 `lifecycle_context` 元数据写入子图 JSON
+Starting from the semantic root node, the extraction performs bidirectional BFS over the call graph:
+1. **Forward BFS**: from the root downward to find all reachable nodes.
+2. **Reverse BFS**: from sensitive sources upward to find all reverse-reachable nodes.
+3. **Intersection**: retain only nodes that are reachable in both directions.
+4. **Attach function bodies**: for each internal function node, attach its full instruction sequence.
+5. **Attach lifecycle context**: write the same-module lifecycle method list as `lifecycle_context` metadata into the subgraph JSON.
 
-输出子图 JSON 示例：
+Example subgraph JSON output:
 ```json
 {
   "root": "com.app.pages.deviceid.deviceid",
@@ -457,26 +438,26 @@ ArkUI 声明式框架中，`initialRender`/`aboutToAppear` 等生命周期方法
 }
 ```
 
-### 误报过滤
+### False-Positive Filtering
 
-`_IGNORED_METHODS` 集合过滤常见非隐私方法：
+The `_IGNORED_METHODS` set filters out common non-privacy methods:
 
-| 类别 | 方法 |
+| Category | Methods |
 |------|------|
-| Promise 链 | `then`, `catch`, `finally` |
-| 日志 | `log`, `error`, `info`, `warn`, `debug` |
-| 资源清理 | `off`, `unsubscribe`, `close`, `release`, `destroy` |
+| Promise chain | `then`, `catch`, `finally` |
+| Logging | `log`, `error`, `info`, `warn`, `debug` |
+| Resource cleanup | `off`, `unsubscribe`, `close`, `release`, `destroy` |
 
 ---
 
-## 扩展方式
+## Extensibility
 
-### 添加新 API 类别
+### Adding New API Categories
 
-1. 在 `rules/privacy_api_rules.yaml` 中添加规则
-2. 无需代码修改 — 规则匹配器在启动时动态索引所有规则
+1. Add rules to `rules/privacy_api_rules.yaml`.
+2. No code changes required — the rule matcher dynamically indexes all rules at startup.
 
-### 批量分析
+### Batch Analysis
 
 ```bash
 for f in *.pa; do
@@ -484,21 +465,21 @@ for f in *.pa; do
 done
 ```
 
-每次运行会在 `output/` 目录生成独立的带时间戳的报告。
+Each run generates an independent timestamped report in the `output/` directory.
 
 ---
 
-## 局限性
+## Limitations
 
-1. **函数间寄存器追踪** — 寄存器追踪在函数边界重置。跨函数数据流（如模块引用作为参数传递）由调用图间接处理，但不追踪具体寄存器值
-2. **CFG 精度** — CFG 建模显式分支和 try-catch 结构。通过计算标签的间接跳转不建模
-3. **保守状态合并** — 在 CFG 汇合点，不一致的寄存器状态默认为 `unknown`
-4. **单文件范围** — 每个 `.pa` 文件独立分析，多文件间引用不解析
-5. **声明式 UI 调用边缺失** — ArkUI 声明式框架中 `initialRender` 通过 `ViewPU` 注册机制引用组件函数，而非通过 `callthis*` 指令调用，导致生命周期方法与页面逻辑函数之间的调用边可能缺失
-6. **规则完整性** — 检测质量依赖规则集。新 API 会出现在 `unmatched_calls` 但不会生成检测结果
+1. **Inter-function register tracking** — Register tracking resets at function boundaries. Cross-function data flow (e.g., module references passed as arguments) is handled indirectly via the call graph, but specific register values are not tracked across calls.
+2. **CFG precision** — The CFG models explicit branches and try-catch structures. Indirect jumps via computed labels are not modeled.
+3. **Conservative state merging** — At CFG join points, inconsistent register states default to `unknown`.
+4. **Single-file scope** — Each `.pa` file is analyzed independently; cross-file references are not resolved.
+5. **Declarative UI call-edge gaps** — In the ArkUI declarative framework, `initialRender` references component functions via the `ViewPU` registration mechanism rather than through `callthis*` instructions, so call edges between lifecycle methods and page logic functions may be missing.
+6. **Rule completeness** — Detection quality depends on the rule set. New APIs will appear in `unmatched_calls` but will not generate detection results until rules are added.
 
 ---
 
 ## License
 
-本项目在 MIT License 下发布，用于鸿蒙应用安全研究和隐私合规审计。
+This project is released under the MIT License, built for HarmonyOS application security research and privacy compliance auditing.
